@@ -82,33 +82,42 @@ grep -q " ${SITE_HOST}\$" /etc/hosts || echo "127.0.0.1 ${SITE_HOST}" | sudo tee
 # fetch fails with "Connection refused". Point WP at the http export URL for
 # the duration of the crawl; the state was already saved above, and the runner
 # is thrown away afterwards. Published URLs are rewritten back below.
-# This site stores absolute APEX URLs (no port) in its menus/content; rewriting them
-# in the DB makes the site 500, so instead serve at the apex on port 80 so the stored
-# links match the crawl exactly (this is the origin's own working config).
-APEX="${SITE_HOST#www.}"
-grep -q " ${APEX}\$" /etc/hosts || echo "127.0.0.1 ${APEX}" | sudo tee -a /etc/hosts >/dev/null
-sed -i "s#define('WP_HOME','https://${SITE_HOST}');#define('WP_HOME','http://${APEX}');#" "$WORK/wp-config.php"
-sed -i "s#define('WP_SITEURL','https://${SITE_HOST}');#define('WP_SITEURL','http://${APEX}');#" "$WORK/wp-config.php"
-pkill -f "php -S 0.0.0.0:8080" || true; pkill -f "php -S 0.0.0.0:80" || true
+# This site's menus/content hardcode absolute APEX URLs, so wget link-following
+# finds nothing and rewriting them in the DB 500s the site. Serve at www:8080 (the
+# config that renders 200) and drive the crawl from the Yoast sitemap instead.
+sed -i "s#define('WP_HOME','https://${SITE_HOST}');#define('WP_HOME','http://${SITE_HOST}:8080');#" "$WORK/wp-config.php"
+sed -i "s#define('WP_SITEURL','https://${SITE_HOST}');#define('WP_SITEURL','http://${SITE_HOST}:8080');#" "$WORK/wp-config.php"
+pkill -f "php -S 0.0.0.0:8080" || true
 sleep 2
 cd "$WORK"
-PHP_CLI_SERVER_WORKERS=6 sudo -E setsid nohup php -S 0.0.0.0:80 -t "$WORK" > /tmp/php-export.log 2>&1 < /dev/null &
+PHP_CLI_SERVER_WORKERS=6 setsid nohup php -S 0.0.0.0:8080 -t "$WORK" > /tmp/php-export.log 2>&1 < /dev/null &
 cd - >/dev/null
+BASE="http://${SITE_HOST}:8080"
 for i in $(seq 1 20); do
-  c=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://${APEX}/" || true)
-  [ "$c" = "200" ] && break
-  sleep 1
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -m 3 "$BASE/" || true)" = "200" ] && break; sleep 1
 done
-echo "  export URL responds: $(curl -s -o /dev/null -w '%{http_code}' -m 8 "http://${APEX}/" || true) (200 expected)"
+echo "  export URL responds: $(curl -s -o /dev/null -w '%{http_code}' -m 8 "$BASE/" || true) (200 expected)"
 
-# Must crawl over http: with WP_HOME set to https, WordPress 301s every
-# request to a port nothing is listening on.
-wget --mirror --page-requisites --adjust-extension --convert-links \
-     --no-parent --restrict-file-names=windows --no-verbose \
-     --execute robots=off --tries=2 --timeout=25 \
-     --reject-regex '(wp-admin|wp-login|xmlrpc|wp-json|/feed|\?|/cart/|/checkout/|/my-account/|add-to-cart|/author/|replytocom|/wp-content/uploads/)' \
-     --directory-prefix "$OUT" --no-host-directories \
-     "http://${APEX}/" || true
+# Collect every public URL from the sitemap index (+ sub-sitemaps). The sitemap is
+# generated from home_url() so its entries already point at the crawl host.
+: > /tmp/urls
+for sm in $(curl -s -m 20 "$BASE/sitemap_index.xml" | grep -oE '<loc>[^<]+' | sed 's/<loc>//'); do
+  curl -s -m 30 "$sm" | grep -oE '<loc>[^<]+' | sed 's/<loc>//' >> /tmp/urls
+done
+# normalise to the crawl host and de-dupe (guard against apex entries)
+sed -i -E "s#https?://[^/]+#${BASE}#" /tmp/urls
+sort -u /tmp/urls -o /tmp/urls
+echo "  sitemap URLs to fetch: $(wc -l < /tmp/urls)"
+# homepage first (with its assets), then every sitemap URL with page requisites
+wget --page-requisites --adjust-extension --convert-links --no-parent --restrict-file-names=windows      --no-verbose --execute robots=off --tries=2 --timeout=25      --reject-regex '(wp-admin|wp-login|xmlrpc|wp-json|/feed|/wp-content/uploads/)'      --directory-prefix "$OUT" --no-host-directories "$BASE/" >/dev/null 2>&1 || true
+while read -r u; do
+  [ -z "$u" ] && continue
+  wget --page-requisites --adjust-extension --convert-links --no-parent --restrict-file-names=windows        --no-verbose --execute robots=off --tries=2 --timeout=25        --reject-regex '(wp-admin|wp-login|xmlrpc|wp-json|/feed|/wp-content/uploads/)'        --directory-prefix "$OUT" --no-host-directories "$u" >/dev/null 2>&1 || true
+done < /tmp/urls
+
+# The media library is served from R2 by the Function, so the crawl skipped it;
+# the reference check is told the same so it neither flags nor "recovers" it.
+EXTERNAL="--external-prefix=/wp-content/uploads/"
 
 # The media library is served from R2 by the Function, so the crawl skipped it;
 # the reference check is told the same so it neither flags nor "recovers" it.
@@ -134,7 +143,7 @@ for round in 1 2; do
     [ "$path" = "/" ] && target="$OUT/index.html"
     if [ ! -f "$target" ]; then
       echo "    recovering: $path"
-      wget --page-requisites --adjust-extension --convert-links --no-verbose            --execute robots=off --tries=2 --timeout=25            --directory-prefix "$OUT" --no-host-directories            "http://${APEX}${path}" >/dev/null 2>&1 || true
+      wget --page-requisites --adjust-extension --convert-links --no-verbose            --execute robots=off --tries=2 --timeout=25            --directory-prefix "$OUT" --no-host-directories            "${BASE}${path}" >/dev/null 2>&1 || true
       added=$((added+1))
     fi
   done < /tmp/paths
@@ -145,7 +154,7 @@ done
 # Pages nothing links to but that are live and may be bookmarked or indexed.
 for path in /shop/; do
   if [ ! -f "$OUT${path}index.html" ]; then
-    wget --page-requisites --adjust-extension --convert-links --no-verbose --execute robots=off --tries=2 --timeout=25          --reject-regex '(/wp-content/uploads/|\?)' --directory-prefix "$OUT" --no-host-directories          "http://${APEX}${path}" >/dev/null 2>&1 || true
+    wget --page-requisites --adjust-extension --convert-links --no-verbose --execute robots=off --tries=2 --timeout=25          --reject-regex '(/wp-content/uploads/|\?)' --directory-prefix "$OUT" --no-host-directories          "${BASE}${path}" >/dev/null 2>&1 || true
     [ -f "$OUT${path}index.html" ] && echo "  fetched orphaned page ${path}" || echo "  WARNING: orphaned page ${path} not fetched"
   fi
 done

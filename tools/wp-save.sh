@@ -98,16 +98,23 @@ for i in $(seq 1 20); do
 done
 echo "  export URL responds: $(curl -s -o /dev/null -w '%{http_code}' -m 8 "$BASE/" || true) (200 expected)"
 
-# Collect every public URL from the sitemap index (+ sub-sitemaps). The sitemap is
-# generated from home_url() so its entries already point at the crawl host.
+# Enumerate public URLs with wp-cli (reliable; the fresh runner's rewrite rules
+# aren't flushed so Yoast's sitemap 404s and CPT permalinks are ugly). Flush first,
+# then list posts + category terms. Runs on PHP 7.4 so plugins load without fataling.
+WPCLI=/tmp/wp-cli.phar
+[ -f "$WPCLI" ] || curl -fsSL -m 60 https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$WPCLI"
+php "$WPCLI" --path="$WORK" --allow-root rewrite flush --hard >/dev/null 2>&1 || true
 : > /tmp/urls
-for sm in $(curl -s -m 20 "$BASE/sitemap_index.xml" | grep -oE '<loc>[^<]+' | sed 's/<loc>//'); do
-  curl -s -m 30 "$sm" | grep -oE '<loc>[^<]+' | sed 's/<loc>//' >> /tmp/urls
+php "$WPCLI" --path="$WORK" --allow-root post list --post_type=page,post,product,catalog --post_status=publish --field=url >> /tmp/urls 2>/dev/null || true
+for tax in category categories product_cat; do
+  php "$WPCLI" --path="$WORK" --allow-root term list "$tax" --field=url >> /tmp/urls 2>/dev/null || true
 done
-# normalise to the crawl host and de-dupe (guard against apex entries)
+# normalise host to the crawl base, drop ugly ?query URLs and dupes
 sed -i -E "s#https?://[^/]+#${BASE}#" /tmp/urls
-sort -u /tmp/urls -o /tmp/urls
-echo "  sitemap URLs to fetch: $(wc -l < /tmp/urls)"
+grep -v '?' /tmp/urls 2>/dev/null | sort -u > /tmp/urls.clean || true
+mv /tmp/urls.clean /tmp/urls
+echo "  URLs to fetch: $(wc -l < /tmp/urls)"
+
 # homepage first (with its assets), then every sitemap URL with page requisites
 wget --page-requisites --adjust-extension --convert-links --no-parent --restrict-file-names=windows      --no-verbose --execute robots=off --tries=2 --timeout=25      --reject-regex '(wp-admin|wp-login|xmlrpc|wp-json|/feed|/wp-content/uploads/)'      --directory-prefix "$OUT" --no-host-directories "$BASE/" >/dev/null 2>&1 || true
 while read -r u; do

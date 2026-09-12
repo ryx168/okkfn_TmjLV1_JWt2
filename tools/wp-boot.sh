@@ -82,7 +82,7 @@ define('DISALLOW_FILE_EDIT', true);
 define('DISALLOW_FILE_MODS', true);
 define('AUTOMATIC_UPDATER_DISABLED', true);
 define('WP_AUTO_UPDATE_CORE', false);
-define('WP_DEBUG', true); define('WP_DEBUG_DISPLAY', true); @ini_set('display_errors','1');
+define('WP_DEBUG', false);
 if (!defined('ABSPATH')) define('ABSPATH', __DIR__ . '/');
 require_once ABSPATH . 'wp-settings.php';
 PHP
@@ -93,6 +93,14 @@ echo "::group::Mail"
 # The runner has no MTA, so wp_mail() fails outright without this - which
 # breaks "lost your password" at exactly the wrong moment.
 mkdir -p wp-content/mu-plugins
+# Old themes/plugins on this estate register hook callbacks whose functions never
+# existed; PHP 7 treated an invalid callback as a silent no-op, PHP 8 makes it a
+# fatal TypeError. Restore the no-op so the site renders on the runner's PHP 8.
+# (cyclone theme: add_filter('pre_get_posts','slider') with no slider() defined.)
+cat > wp-content/mu-plugins/00-compat.php <<'PHP'
+<?php
+if (!function_exists('slider')) { function slider($q = null) { return $q; } }
+PHP
 cat > wp-content/mu-plugins/00-smtp.php <<'PHP'
 <?php
 add_action('phpmailer_init', function ($m) {
@@ -130,7 +138,6 @@ sleep 4
 # because WordPress canonicalises to WP_HOME.
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${SITE_HOST}" http://127.0.0.1:8080/ || true)
 echo "  homepage responds: $code"
-if [ "$code" != "200" ]; then echo "  --- FATAL body ---"; curl -s -m 8 -H "Host: ${SITE_HOST}" http://127.0.0.1:8080/ 2>/dev/null | sed -e "s/<[^>]*>//g" | grep -viE "^[[:space:]]*$" | head -25 | sed "s/^/    /"; fi
 admin=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${SITE_HOST}" http://127.0.0.1:8080/wp-admin/ || true)
 echo "  wp-admin responds: $admin (302 to login is correct)"
 

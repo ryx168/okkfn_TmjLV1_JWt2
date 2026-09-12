@@ -82,33 +82,24 @@ grep -q " ${SITE_HOST}\$" /etc/hosts || echo "127.0.0.1 ${SITE_HOST}" | sudo tee
 # fetch fails with "Connection refused". Point WP at the http export URL for
 # the duration of the crawl; the state was already saved above, and the runner
 # is thrown away afterwards. Published URLs are rewritten back below.
-sed -i "s#define('WP_HOME','https://${SITE_HOST}');#define('WP_HOME','http://${SITE_HOST}:8080');#" "$WORK/wp-config.php"
-sed -i "s#define('WP_SITEURL','https://${SITE_HOST}');#define('WP_SITEURL','http://${SITE_HOST}:8080');#" "$WORK/wp-config.php"
-# Old sites store absolute URLs (menus, page-builder content, custom post types) that
-# the WP_HOME override does NOT touch, so the runner still emits the origin's own host
-# and wget follows nothing. Rewrite every stored URL to the crawl host:port with wp-cli
-# (handles serialized data). Idempotent; the runner is thrown away after.
-ORIG=$(mysql -N -uroot -proot wp -e "SELECT option_value FROM wp_options WHERE option_name='siteurl'" 2>/dev/null)
-CRAWL="http://${SITE_HOST}:8080"
-if [ -n "$ORIG" ] && [ "$ORIG" != "$CRAWL" ]; then
-  [ -f /tmp/wp-cli.phar ] || curl -sSL -o /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
-  php /tmp/wp-cli.phar --path="$WORK" --allow-root --skip-plugins --skip-themes search-replace "$ORIG" "$CRAWL" --all-tables --skip-columns=guid --report-changed-only 2>&1 | tail -3 | sed 's/^/  wp-cli: /' || echo "  wp-cli search-replace failed (continuing)"
-  # also the non-www <-> www variant of the origin, in case both appear
-  ALT=$(printf '%s' "$ORIG" | sed -E 's#https?://##; s#^www\.##')
-  php /tmp/wp-cli.phar --path="$WORK" --allow-root --skip-plugins --skip-themes search-replace "http://${ALT}" "$CRAWL" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
-  php /tmp/wp-cli.phar --path="$WORK" --allow-root --skip-plugins --skip-themes search-replace "https://${ALT}" "$CRAWL" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
-fi
-pkill -f "php -S 0.0.0.0:8080" || true
+# This site stores absolute APEX URLs (no port) in its menus/content; rewriting them
+# in the DB makes the site 500, so instead serve at the apex on port 80 so the stored
+# links match the crawl exactly (this is the origin's own working config).
+APEX="${SITE_HOST#www.}"
+grep -q " ${APEX}\$" /etc/hosts || echo "127.0.0.1 ${APEX}" | sudo tee -a /etc/hosts >/dev/null
+sed -i "s#define('WP_HOME','https://${SITE_HOST}');#define('WP_HOME','http://${APEX}');#" "$WORK/wp-config.php"
+sed -i "s#define('WP_SITEURL','https://${SITE_HOST}');#define('WP_SITEURL','http://${APEX}');#" "$WORK/wp-config.php"
+pkill -f "php -S 0.0.0.0:8080" || true; pkill -f "php -S 0.0.0.0:80" || true
 sleep 2
 cd "$WORK"
-PHP_CLI_SERVER_WORKERS=6 setsid nohup php -S 0.0.0.0:8080 -t "$WORK" > /tmp/php-export.log 2>&1 < /dev/null &
+PHP_CLI_SERVER_WORKERS=6 sudo -E setsid nohup php -S 0.0.0.0:80 -t "$WORK" > /tmp/php-export.log 2>&1 < /dev/null &
 cd - >/dev/null
 for i in $(seq 1 20); do
-  c=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://${SITE_HOST}:8080/" || true)
+  c=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://${APEX}/" || true)
   [ "$c" = "200" ] && break
   sleep 1
 done
-echo "  export URL responds: $(curl -s -o /dev/null -w '%{http_code}' -m 8 "http://${SITE_HOST}:8080/" || true) (200 expected)"
+echo "  export URL responds: $(curl -s -o /dev/null -w '%{http_code}' -m 8 "http://${APEX}/" || true) (200 expected)"
 
 # Must crawl over http: with WP_HOME set to https, WordPress 301s every
 # request to a port nothing is listening on.
@@ -117,7 +108,7 @@ wget --mirror --page-requisites --adjust-extension --convert-links \
      --execute robots=off --tries=2 --timeout=25 \
      --reject-regex '(wp-admin|wp-login|xmlrpc|wp-json|/feed|\?|/cart/|/checkout/|/my-account/|add-to-cart|/author/|replytocom|/wp-content/uploads/)' \
      --directory-prefix "$OUT" --no-host-directories \
-     "http://${SITE_HOST}:8080/" || true
+     "http://${APEX}/" || true
 
 # The media library is served from R2 by the Function, so the crawl skipped it;
 # the reference check is told the same so it neither flags nor "recovers" it.
@@ -143,7 +134,7 @@ for round in 1 2; do
     [ "$path" = "/" ] && target="$OUT/index.html"
     if [ ! -f "$target" ]; then
       echo "    recovering: $path"
-      wget --page-requisites --adjust-extension --convert-links --no-verbose            --execute robots=off --tries=2 --timeout=25            --directory-prefix "$OUT" --no-host-directories            "http://${SITE_HOST}:8080${path}" >/dev/null 2>&1 || true
+      wget --page-requisites --adjust-extension --convert-links --no-verbose            --execute robots=off --tries=2 --timeout=25            --directory-prefix "$OUT" --no-host-directories            "http://${APEX}${path}" >/dev/null 2>&1 || true
       added=$((added+1))
     fi
   done < /tmp/paths
@@ -154,7 +145,7 @@ done
 # Pages nothing links to but that are live and may be bookmarked or indexed.
 for path in /shop/; do
   if [ ! -f "$OUT${path}index.html" ]; then
-    wget --page-requisites --adjust-extension --convert-links --no-verbose --execute robots=off --tries=2 --timeout=25          --reject-regex '(/wp-content/uploads/|\?)' --directory-prefix "$OUT" --no-host-directories          "http://${SITE_HOST}:8080${path}" >/dev/null 2>&1 || true
+    wget --page-requisites --adjust-extension --convert-links --no-verbose --execute robots=off --tries=2 --timeout=25          --reject-regex '(/wp-content/uploads/|\?)' --directory-prefix "$OUT" --no-host-directories          "http://${APEX}${path}" >/dev/null 2>&1 || true
     [ -f "$OUT${path}index.html" ] && echo "  fetched orphaned page ${path}" || echo "  WARNING: orphaned page ${path} not fetched"
   fi
 done

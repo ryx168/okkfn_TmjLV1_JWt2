@@ -50,6 +50,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # This 2017 site was built for PHP 7.4 (its theme has dangling hook callbacks
+      # that PHP 7 tolerates as no-ops but PHP 8 turns into fatal TypeErrors). Run the
+      # whole session on 7.4 so it behaves exactly as it does on the origin.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "7.4"
+          extensions: mysqli, gd, curl, mbstring, xml, zip, exif, intl
+          ini-values: memory_limit=512M
+
       - name: Restore state and boot WordPress
         run: bash tools/wp-boot.sh
 

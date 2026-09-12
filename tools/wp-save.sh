@@ -236,6 +236,10 @@ SED
   left=$({ grep -rhoF "%3F" "$OUT" --include='*.html' 2>/dev/null || true; } | wc -l)
   echo "  query-mangled asset references repaired; remaining: ${left}"
 fi
+# wget --restrict-file-names=windows bakes cache-busting queries ("?t=..&ver=..") into
+# asset refs as "@t=..&amp;ver=..". Strip back to the clean name across all html so the
+# recovery step can copy the real file (e.g. ckeditor.js) from the WP tree.
+find "$OUT" -name '*.html' -print0 2>/dev/null | xargs -0 -r sed -i -E -f "$(dirname "$0")/unmangle-query.sed" || true
 
 # Normalise internal links to SITE_HOST. The content links to the bare apex
 # more often than to www, and a zone apex cannot be a CNAME - so those links

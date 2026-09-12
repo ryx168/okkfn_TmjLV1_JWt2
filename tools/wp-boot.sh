@@ -81,7 +81,7 @@ define('DISALLOW_FILE_EDIT', true);
 define('DISALLOW_FILE_MODS', true);
 define('AUTOMATIC_UPDATER_DISABLED', true);
 define('WP_AUTO_UPDATE_CORE', false);
-define('WP_DEBUG', false);
+define('WP_DEBUG', true); define('WP_DEBUG_DISPLAY', true); @ini_set('display_errors','1');
 if (!defined('ABSPATH')) define('ABSPATH', __DIR__ . '/');
 require_once ABSPATH . 'wp-settings.php';
 PHP
@@ -129,6 +129,7 @@ sleep 4
 # because WordPress canonicalises to WP_HOME.
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${SITE_HOST}" http://127.0.0.1:8080/ || true)
 echo "  homepage responds: $code"
+if [ "$code" != "200" ]; then echo "  --- homepage body (debug) ---"; curl -s -m 8 -H "Host: ${SITE_HOST}" http://127.0.0.1:8080/ 2>/dev/null | sed -e "s/<[^>]*>//g" | grep -viE "^\s*$" | head -30 | sed "s/^/    /"; echo "  --- php.log ---"; tail -20 /tmp/php.log 2>/dev/null | sed "s/^/    /"; fi
 admin=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${SITE_HOST}" http://127.0.0.1:8080/wp-admin/ || true)
 echo "  wp-admin responds: $admin (302 to login is correct)"
 

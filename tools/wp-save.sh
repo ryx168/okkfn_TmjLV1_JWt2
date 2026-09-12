@@ -92,11 +92,11 @@ ORIG=$(mysql -N -uroot -proot wp -e "SELECT option_value FROM wp_options WHERE o
 CRAWL="http://${SITE_HOST}:8080"
 if [ -n "$ORIG" ] && [ "$ORIG" != "$CRAWL" ]; then
   [ -f /tmp/wp-cli.phar ] || curl -sSL -o /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
-  php /tmp/wp-cli.phar --path="$WORK" --allow-root search-replace "$ORIG" "$CRAWL" --all-tables --skip-columns=guid --report-changes-only 2>&1 | tail -3 | sed 's/^/  wp-cli: /' || echo "  wp-cli search-replace failed (continuing)"
+  php /tmp/wp-cli.phar --path="$WORK" --allow-root --skip-plugins --skip-themes search-replace "$ORIG" "$CRAWL" --all-tables --skip-columns=guid --report-changes-only 2>&1 | tail -3 | sed 's/^/  wp-cli: /' || echo "  wp-cli search-replace failed (continuing)"
   # also the non-www <-> www variant of the origin, in case both appear
   ALT=$(printf '%s' "$ORIG" | sed -E 's#https?://##; s#^www\.##')
-  php /tmp/wp-cli.phar --path="$WORK" --allow-root search-replace "http://${ALT}" "$CRAWL" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
-  php /tmp/wp-cli.phar --path="$WORK" --allow-root search-replace "https://${ALT}" "$CRAWL" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
+  php /tmp/wp-cli.phar --path="$WORK" --allow-root --skip-plugins --skip-themes search-replace "http://${ALT}" "$CRAWL" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
+  php /tmp/wp-cli.phar --path="$WORK" --allow-root --skip-plugins --skip-themes search-replace "https://${ALT}" "$CRAWL" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
 fi
 pkill -f "php -S 0.0.0.0:8080" || true
 sleep 2
